@@ -1,0 +1,143 @@
+name: ${COMPOSE_PROJECT_NAME:-pgstack}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18}
+    container_name: ${POSTGRES_CONTAINER_NAME:-postgres}
+    restart: unless-stopped
+    shm_size: ${POSTGRES_SHM_SIZE:-2gb}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+      TZ: ${TZ:-America/Cuiaba}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-100}"
+      - "-c"
+      - "shared_buffers=${PG_SHARED_BUFFERS:-1536MB}"
+      - "-c"
+      - "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-4608MB}"
+      - "-c"
+      - "work_mem=${PG_WORK_MEM:-20MB}"
+      - "-c"
+      - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "log_min_duration_statement=${PG_LOG_MIN_DURATION:-500}"
+      - "-c"
+      - "log_connections=on"
+      - "-c"
+      - "log_disconnections=on"
+      - "-c"
+      - "log_checkpoints=on"
+      - "-c"
+      - "log_lock_waits=on"
+      - "-c"
+      - "log_temp_files=0"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "${POSTGRES_LOG_MAX_SIZE:-10m}"
+        max-file: "${POSTGRES_LOG_MAX_FILE:-3}"
+    networks:
+      - dbnet
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: ${PGBOUNCER_CONTAINER_NAME:-pgbouncer}
+    restart: unless-stopped
+    ports:
+      - "${PGBOUNCER_PORT:-6432}:5432"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      # transaction mode: conexão é devolvida ao pool no fim de cada transação.
+      # É o modo certo pra web apps / Prisma / serverless. Perde prepared
+      # statements e algumas features de session — Prisma lida com isso via
+      # flag pgbouncer=true na connection string.
+      POOL_MODE: ${PGBOUNCER_POOL_MODE:-transaction}
+      AUTH_TYPE: scram-sha-256
+      # Máximo de clientes conectados simultaneamente NO pgbouncer
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-1000}
+      # Máximo de conexões reais que o pgbouncer abre ao postgres por pool
+      # (um pool por par user+database). 25 * nº de pools <= postgres max_connections
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-25}
+      # Se todas as conexões do pool estão ocupadas, o pgbouncer pode abrir
+      # até RESERVE_POOL_SIZE extras temporariamente
+      RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-5}
+      # Timeout pra clientes esperando conexão livre (segundos)
+      QUERY_WAIT_TIMEOUT: ${PGBOUNCER_QUERY_WAIT_TIMEOUT:-120}
+      ADMIN_USERS: ${POSTGRES_USER}
+      STATS_USERS: ${POSTGRES_USER}
+      TZ: ${TZ:-America/Cuiaba}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - dbnet
+
+  backup-scheduler:
+    build:
+      context: ./docker/backup
+      args:
+        POSTGRES_IMAGE: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18}
+    container_name: ${BACKUP_CONTAINER_NAME:-postgres-backup}
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-0 3 * * *}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_ON_START: ${BACKUP_ON_START:-false}
+      TZ: ${TZ:-America/Cuiaba}
+    volumes:
+      - ./backups:/backups
+      - ./scripts:/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - dbnet
+
+volumes:
+  pgdata:
+
+networks:
+  dbnet:
+    driver: bridge

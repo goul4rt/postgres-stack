@@ -1,0 +1,12 @@
+# Env vars (nunca commitar senhas)
+.env
+
+# Backups
+backups/*.sql.gz
+backups/*.log
+
+# Logs locais
+*.log
+
+# Dados locais se alguém mapear volume por bind
+data/
