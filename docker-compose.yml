@@ -1,10 +1,27 @@
 name: ${COMPOSE_PROJECT_NAME:-pgstack}
 
+# Sobre os `mem_limit` abaixo.
+#
+# A máquina tem 11 GB e divide com o dubladopedia, o painel do Delfus e um bot.
+# Nenhum container daqui tinha teto, então um vazamento derrubava os vizinhos.
+# O limite não reserva memória — é o ponto onde o kernel mata o processo — logo
+# a soma passar da RAM é esperado: o objetivo é conter UM serviço fugindo.
+#
+# Este kernel (5.15) não tem `memory.peak`, então não há histórico de pico por
+# container. Os valores levam folga por isso e devem ser reapertados quando
+# houver métrica de verdade.
+
 services:
   postgres:
     image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18}
     container_name: ${POSTGRES_CONTAINER_NAME:-postgres}
     restart: unless-stopped
+    # O uso observado é 1,6 GB, mas quem manda aqui é a configuração:
+    # shared_buffers de 1,5 GB mais o shm_size de 2 GB abaixo, e memória
+    # compartilhada é cobrada do cgroup. Somando o work_mem de até 100
+    # conexões, 4 GB é o teto que não mata o banco em pico legítimo.
+    # Limite em banco é OOM kill, não throttle — não há meio-termo.
+    mem_limit: 4g
     shm_size: ${POSTGRES_SHM_SIZE:-2gb}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -66,6 +83,9 @@ services:
     image: edoburu/pgbouncer:latest
     container_name: ${PGBOUNCER_CONTAINER_NAME:-pgbouncer}
     restart: unless-stopped
+    # Processo único, 1-2 MB medidos e footprint que não cresce com o
+    # tempo — pgbouncer multiplexa conexões, não acumula estado.
+    mem_limit: 128m
     ports:
       - "${PGBOUNCER_PORT:-6432}:5432"
     environment:
@@ -104,6 +124,45 @@ services:
     networks:
       - dbnet
 
+  pgbouncer-quati:
+    image: edoburu/pgbouncer:latest
+    container_name: ${PGBOUNCER_QUATI_CONTAINER_NAME:-pgbouncer-quati}
+    restart: unless-stopped
+    # Processo único, 1-2 MB medidos e footprint que não cresce com o
+    # tempo — pgbouncer multiplexa conexões, não acumula estado.
+    mem_limit: 128m
+    ports:
+      - "${PGBOUNCER_QUATI_PORT:-6433}:5432"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      # único destino diferente do pgbouncer principal: outro database no
+      # MESMO postgres. Mesmo user (app) — superuser conecta em qualquer db.
+      DB_NAME: ${PGBOUNCER_QUATI_DB:-quati_db}
+      POOL_MODE: ${PGBOUNCER_POOL_MODE:-transaction}
+      AUTH_TYPE: scram-sha-256
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-1000}
+      # separado do PGBOUNCER_DEFAULT_POOL_SIZE do pgbouncer principal: os dois
+      # pools somados não podem passar de max_connections do postgres (100).
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_QUATI_DEFAULT_POOL_SIZE:-25}
+      RESERVE_POOL_SIZE: ${PGBOUNCER_RESERVE_POOL_SIZE:-5}
+      QUERY_WAIT_TIMEOUT: ${PGBOUNCER_QUERY_WAIT_TIMEOUT:-120}
+      ADMIN_USERS: ${POSTGRES_USER}
+      STATS_USERS: ${POSTGRES_USER}
+      TZ: ${TZ:-America/Cuiaba}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - dbnet
+
   backup-scheduler:
     build:
       context: ./docker/backup
@@ -111,6 +170,9 @@ services:
         POSTGRES_IMAGE: ${POSTGRES_IMAGE:-pgvector/pgvector:pg18}
     container_name: ${BACKUP_CONTAINER_NAME:-postgres-backup}
     restart: unless-stopped
+    # Ocioso quase sempre (0 MB), mas na janela do backup roda pg_dump
+    # canalizado em gzip; 512 MB cobre os buffers dos dois com folga.
+    mem_limit: 512m
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
