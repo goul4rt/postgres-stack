@@ -38,10 +38,22 @@ chmod 600 /etc/backup.env
 
 # ---------------------------------------------------------------------------
 # Instala o crontab
-# Redireciona stdout/stderr pro arquivo de log E pro stdout do container (fd 1)
-# — assim `docker logs` mostra tudo em tempo real.
+#
+# Duas armadilhas aqui, e as duas juntas produziram 10 dias de backup nenhum
+# sem uma única linha de erro em lugar algum:
+#
+# 1. Este arquivo roda sob bash, mas o cron executa a linha do crontab com
+#    /bin/sh — que no Debian é dash, onde `source` não existe. Tem que ser o
+#    dot POSIX.
+#
+# 2. Em `A && B >> log 2>&1` o redirect liga só ao B. Quando o A falhava, o
+#    erro não ia para o log: ia para o stdout do cron, que sem MTA é
+#    descartado. O arquivo ficava com 0 bytes, o `tail -F` abaixo não tinha o
+#    que mostrar, e `docker logs` exibia só as linhas de inicialização — o
+#    serviço parecia saudável. As chaves agrupam o par para que qualquer falha,
+#    inclusive a de carregar o env, apareça no log.
 # ---------------------------------------------------------------------------
-CRON_CMD='source /etc/backup.env && /scripts/backup.sh >> /backups/backup.log 2>&1'
+CRON_CMD='{ . /etc/backup.env && /scripts/backup.sh; } >> /backups/backup.log 2>&1'
 echo "${BACKUP_SCHEDULE} ${CRON_CMD}" > /var/spool/cron/crontabs/root
 chmod 600 /var/spool/cron/crontabs/root
 
